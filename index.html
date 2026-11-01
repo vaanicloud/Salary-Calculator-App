@@ -839,22 +839,23 @@ async function loadFxRate(){
   <p class="note">This is an estimate, not a legal/payroll guarantee. Confirm leave-pay basis, entitlement, cut-off dates, OT approval and deductions with your employer. Values are saved locally on this device.</p>
 </section>
 
-<!-- Data safety: automatic local snapshot + manual backup/restore -->
+<!-- Data safety: automatic local + IndexedDB backup and manual export/restore -->
 <section id="dataSafetyPanel" style="max-width:480px;margin:14px auto;padding:14px;background:#fff;border:1px solid #cbd5e1;border-radius:14px;box-shadow:0 2px 8px rgba(15,23,42,.06)">
   <h2 style="margin:0 0 6px;font-size:1rem;color:#0b1f42">💾 Data Backup &amp; Restore</h2>
-  <p style="margin:0 0 10px;font-size:.82rem;color:#475569">Attendance and salary settings auto-save on this device. Download a backup regularly so you can restore it if app/browser data is lost.</p>
+  <p style="margin:0 0 10px;font-size:.82rem;color:#475569">Your records are saved automatically on this device in app storage and a separate IndexedDB backup. For protection if app data or the phone is erased, keep an exported backup file too.</p>
   <div style="display:flex;gap:8px;flex-wrap:wrap">
     <button type="button" onclick="gulfExportBackup()" style="flex:1;min-width:130px;padding:11px;border:0;border-radius:9px;background:#166534;color:#fff;font-weight:800">Download Backup</button>
     <button type="button" onclick="document.getElementById('gulfBackupFile').click()" style="flex:1;min-width:130px;padding:11px;border:0;border-radius:9px;background:#1d4ed8;color:#fff;font-weight:800">Restore Backup</button>
-    <button type="button" onclick="gulfSaveSnapshot(true)" style="flex:1;min-width:130px;padding:11px;border:0;border-radius:9px;background:#475569;color:#fff;font-weight:800">Save Backup on Device</button>
+    <button type="button" onclick="gulfSaveSnapshot(true)" style="flex:1;min-width:130px;padding:11px;border:0;border-radius:9px;background:#475569;color:#fff;font-weight:800">Save Backup Now</button>
   </div>
   <input id="gulfBackupFile" type="file" accept=".json,application/json" style="display:none" onchange="gulfImportBackup(event)">
-  <p id="gulfBackupStatus" role="status" style="margin:10px 0 0;font-size:.78rem;color:#475569">Automatic local snapshots are enabled when storage is available. For protection against device/browser data loss, download the JSON backup too.</p>
+  <p id="gulfBackupStatus" role="status" style="margin:10px 0 0;font-size:.78rem;color:#475569">Starting automatic local backups…</p>
 </section>
 <script>
 (function(){
-  const snapshotKey='gulf_auto_backup_v1';
+  const snapshotKey='gulf_auto_backup_v1', dbName='GulfDutySalaryBackup', storeName='snapshots';
   const status=()=>document.getElementById('gulfBackupStatus');
+  let timer=null, dbPromise=null;
   function collect(){
     const data={format:'gulf-duty-salary-backup',version:1,createdAt:new Date().toISOString(),items:{}};
     for(let i=0;i<localStorage.length;i++){
@@ -863,49 +864,88 @@ async function loadFxRate(){
     }
     return data;
   }
-  window.gulfSaveSnapshot=function(showMessage){
+  function openDb(){
+    if(!('indexedDB' in window)) return Promise.reject(new Error('IndexedDB unavailable'));
+    if(!dbPromise) dbPromise=new Promise((resolve,reject)=>{
+      const req=indexedDB.open(dbName,1);
+      req.onupgradeneeded=()=>{if(!req.result.objectStoreNames.contains(storeName))req.result.createObjectStore(storeName);};
+      req.onsuccess=()=>resolve(req.result); req.onerror=()=>reject(req.error||new Error('Database open failed'));
+    });
+    return dbPromise;
+  }
+  async function saveIndexed(data){
+    const db=await openDb();
+    await new Promise((resolve,reject)=>{
+      const tx=db.transaction(storeName,'readwrite');
+      tx.objectStore(storeName).put(data,'latest');
+      tx.oncomplete=resolve; tx.onerror=()=>reject(tx.error||new Error('Backup write failed')); tx.onabort=()=>reject(tx.error||new Error('Backup aborted'));
+    });
+  }
+  window.gulfSaveSnapshot=async function(showMessage){
     try{
       const data=collect();
       localStorage.setItem(snapshotKey,JSON.stringify(data));
-      if(showMessage && status()) status().textContent='Local snapshot saved at '+new Date().toLocaleString()+'. For safer recovery, also tap Download Backup.';
+      await saveIndexed(data);
+      if(showMessage && status()) status().textContent='Automatic backup saved on this device at '+new Date().toLocaleString()+'. Also download a copy for protection if app data is erased.';
       return true;
     }catch(e){
-      if(status()) status().textContent='Local snapshot could not be saved (storage may be full/unavailable). Please use Download Backup.';
+      if(status()) status().textContent='Backup warning: '+(e&&e.message?e.message:'device storage unavailable')+'. Download a JSON backup now.';
       return false;
     }
   };
   window.gulfExportBackup=function(){
     try{
       const blob=new Blob([JSON.stringify(collect(),null,2)],{type:'application/json'});
-      const url=URL.createObjectURL(blob);
-      const a=document.createElement('a');a.href=url;a.download='Gulf-Duty-Salary-Backup-'+new Date().toISOString().slice(0,10)+'.json';
-      document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1500);
-      if(status()) status().textContent='Backup download requested. Check your Downloads folder and keep the JSON file safe.';
-    }catch(e){if(status())status().textContent='Backup failed. Try again in the same browser where your entries are visible.';}
+      const url=URL.createObjectURL(blob),a=document.createElement('a');
+      a.href=url;a.download='Gulf-Duty-Salary-Backup-'+new Date().toISOString().slice(0,10)+'.json';
+      document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),3000);
+      if(status())status().textContent='Backup file requested. Confirm it appears in Downloads and keep a copy outside this app.';
+    }catch(e){if(status())status().textContent='Download failed. Please try again.';}
   };
   window.gulfImportBackup=function(event){
-    const file=event.target.files && event.target.files[0]; if(!file)return;
+    const file=event.target.files&&event.target.files[0];if(!file)return;
     const reader=new FileReader();
-    reader.onload=function(){
+    reader.onload=async function(){
       try{
         const data=JSON.parse(String(reader.result||''));
-        if(data.format!=='gulf-duty-salary-backup' || !data.items || typeof data.items!=='object') throw new Error('Invalid backup');
-        if(!confirm('Restore this backup? Existing Gulf app data in THIS browser may be overwritten. If current data is visible, download its backup first.')){event.target.value='';return;}
-        for(const k of Object.keys(data.items)){
-          if((k.startsWith('gulf_') || k.startsWith('gulf-')) && typeof data.items[k]==='string') localStorage.setItem(k,data.items[k]);
-        }
+        if(data.format!=='gulf-duty-salary-backup'||!data.items||typeof data.items!=='object')throw new Error('Invalid backup');
+        if(!confirm('Restore this backup? Current Gulf app data may be overwritten.')){event.target.value='';return;}
+        for(const k of Object.keys(data.items))if((k.startsWith('gulf_')||k.startsWith('gulf-'))&&typeof data.items[k]==='string')localStorage.setItem(k,data.items[k]);
+        await window.gulfSaveSnapshot(false);
         alert('Backup restored. The app will reload now.');location.reload();
-      }catch(e){alert('This backup file could not be read. Choose a valid Gulf Duty & Salary Pro JSON backup.');}
+      }catch(e){alert('Could not restore this backup. Choose a valid Gulf Duty & Salary Pro JSON file.');}
       event.target.value='';
     };
     reader.readAsText(file);
   };
-  const capture=()=>window.gulfSaveSnapshot(false);
-  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',capture,{once:true}); else capture();
-  setInterval(capture,30000);
-  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')capture();});
-  window.addEventListener('pagehide',capture);
-})();
+  function schedule(){clearTimeout(timer);timer=setTimeout(()=>window.gulfSaveSnapshot(false),250);}
+  const originalSet=Storage.prototype.setItem;
+  Storage.prototype.setItem=function(key,value){
+    const result=originalSet.call(this,key,value);
+    if(this===localStorage && typeof key==='string' && (key.startsWith('gulf_')||key.startsWith('gulf-')) && key!==snapshotKey)schedule();
+    return result;
+  };
+  async function recoverIfEmpty(){
+    try{
+      const db=await openDb();
+      const data=await new Promise((resolve,reject)=>{
+        const tx=db.transaction(storeName,'readonly'),req=tx.objectStore(storeName).get('latest');
+        req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);
+      });
+      const hasAttendance=!!localStorage.getItem('gulf_att_v5');
+      if(data&&data.items&&!hasAttendance&&Object.keys(data.items).length){
+        for(const k of Object.keys(data.items))if((k.startsWith('gulf_')||k.startsWith('gulf-'))&&typeof data.items[k]==='string')localStorage.setItem(k,data.items[k]);
+        if(status())status().textContent='Recovered your latest on-device backup. Reloading…';
+        location.reload();
+      }else if(status())status().textContent='Automatic backup is active: app storage + separate IndexedDB copy. Download a backup too for protection against app-data/device deletion.';
+    }catch(e){if(status())status().textContent='Local auto-backup is active where supported, but a second backup could not be verified. Download a JSON backup regularly.';}
+  }
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>{window.gulfSaveSnapshot(false);recoverIfEmpty();},{once:true});
+  else{window.gulfSaveSnapshot(false);recoverIfEmpty();}
+  setInterval(()=>window.gulfSaveSnapshot(false),30000);
+  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')window.gulfSaveSnapshot(false);});
+  window.addEventListener('pagehide',()=>window.gulfSaveSnapshot(false));
+})(); 
 </script>
 
 </body>
